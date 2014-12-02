@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
+import inspect
+import warnings
 from django.db import models
-from django.db.models import fields
+from django.db.models import fields, ImageField
 from django.db.models.fields import related
+from django.contrib.contenttypes.generic import GenericRelation
 from django.utils.datastructures import SortedDict
+from django.utils.six import with_metaclass
+import autofixture
 from autofixture import constraints, generators, signals
 from autofixture.values import Values
+
 
 
 class CreateInstanceError(Exception):
@@ -76,7 +82,6 @@ class AutoFixtureBase(object):
 
         * ``XMLField``
         * ``FileField``
-        * ``ImageField``
 
         Patches are welcome.
     '''
@@ -101,9 +106,11 @@ class AutoFixtureBase(object):
         (fields.PositiveIntegerField, generators.PositiveIntegerGenerator),
         (fields.SmallIntegerField, generators.SmallIntegerGenerator),
         (fields.IntegerField, generators.IntegerGenerator),
+        (fields.FloatField, generators.FloatGenerator),
         (fields.IPAddressField, generators.IPAddressGenerator),
         (fields.TextField, generators.LoremGenerator),
         (fields.TimeField, generators.TimeGenerator),
+        (ImageField, generators.ImageGenerator),
     ))
 
     field_values = Values()
@@ -233,8 +240,12 @@ class AutoFixtureBase(object):
         '''
         if isinstance(field, fields.AutoField):
             return None
-        if field.default is not fields.NOT_PROVIDED and \
-            not self.overwrite_defaults:
+        if isinstance(field, related.OneToOneField) and field.primary_key:
+            return None
+        if (
+            field.default is not fields.NOT_PROVIDED and
+            not self.overwrite_defaults and
+            field.name not in self.field_values):
                 return None
         kwargs = {}
 
@@ -254,19 +265,31 @@ class AutoFixtureBase(object):
             return generators.ChoicesGenerator(choices=field.choices, **kwargs)
         if isinstance(field, related.ForeignKey):
             # if generate_fk is set, follow_fk is ignored.
-            if field.name in self.generate_fk:
+            is_self_fk = (field.rel.to().__class__ == self.model)
+            if field.name in self.generate_fk and not is_self_fk:
                 return generators.InstanceGenerator(
-                    AutoFixture(
+                    autofixture.get(
                         field.rel.to,
                         follow_fk=self.follow_fk.get_deep_links(field.name),
                         generate_fk=self.generate_fk.get_deep_links(field.name)),
                     limit_choices_to=field.rel.limit_choices_to)
             if field.name in self.follow_fk:
-                return generators.InstanceSelector(
+                selected = generators.InstanceSelector(
                     field.rel.to,
                     limit_choices_to=field.rel.limit_choices_to)
+                if selected.get_value() is not None:
+                    return selected
             if field.blank or field.null:
                 return generators.NoneGenerator()
+            if is_self_fk and not field.null:
+                raise CreateInstanceError(
+                    u'Cannot resolve self referencing field "%s" to "%s" without null=True' % (
+                        field.name,
+                        '%s.%s' % (
+                            field.rel.to._meta.app_label,
+                            field.rel.to._meta.object_name,
+                        )
+                ))
             raise CreateInstanceError(
                 u'Cannot resolve ForeignKey "%s" to "%s". Provide either '
                 u'"follow_fk" or "generate_fk" parameters.' % (
@@ -280,9 +303,7 @@ class AutoFixtureBase(object):
             if field.name in self.generate_m2m:
                 min_count, max_count = self.generate_m2m[field.name]
                 return generators.MultipleInstanceGenerator(
-                    AutoFixture(
-                        field.rel.to
-                    ),
+                    autofixture.get(field.rel.to),
                     limit_choices_to=field.rel.limit_choices_to,
                     min_count=min_count,
                     max_count=max_count,
@@ -336,6 +357,8 @@ class AutoFixtureBase(object):
                     min_value=-field.MAX_BIGINT - 1,
                     max_value=field.MAX_BIGINT,
                     **kwargs)
+        if isinstance(field, ImageField):
+            return generators.ImageGenerator(storage=field.storage, **kwargs)
         for field_class, generator in self.field_to_generator.items():
             if isinstance(field, field_class):
                 return generator(**kwargs)
@@ -363,20 +386,9 @@ class AutoFixtureBase(object):
     def process_m2m(self, instance, field):
         # check django's version number to determine how intermediary models
         # are checked if they are auto created or not.
-        from django import VERSION
         auto_created_through_model = False
         through = field.rel.through
-        if VERSION < (1,2):
-            if through:
-                if isinstance(through, basestring):
-                    bits = through.split('.')
-                    if len(bits) < 2:
-                        bits = [instance._meta.app_label] + bits
-                    through = models.get_model(*bits)
-            else:
-                auto_created_through_model = True
-        else:
-            auto_created_through_model = through._meta.auto_created
+        auto_created_through_model = through._meta.auto_created
 
         if auto_created_through_model:
             return self.process_field(instance, field)
@@ -412,7 +424,12 @@ class AutoFixtureBase(object):
                 max_count=max_count,
                 **kwargs).generate()
 
-    def check_constrains(self, instance):
+    def check_constrains(self, *args, **kwargs):
+        raise TypeError(
+            'This method was renamed recently, since it contains a typo. '
+            'Please use the check_constraints method from now on.')
+
+    def check_constraints(self, instance):
         '''
         Return fieldnames which need recalculation.
         '''
@@ -420,15 +437,26 @@ class AutoFixtureBase(object):
         for constraint in self.constraints:
             try:
                 constraint(self.model, instance)
-            except constraints.InvalidConstraint, e:
+            except constraints.InvalidConstraint as e:
                 recalc_fields.extend(e.fields)
         return recalc_fields
 
-    def post_process_instance(self, instance):
+    def post_process_instance(self, instance, commit):
         '''
-        Overwrite this method to modify the created *instance* at the last
-        possible moment. It gets the generated *instance* and must return the
-        modified instance.
+        Overwrite this method to modify the created *instance* before it gets
+        returned by the :meth:`create` or :meth:`create_one`.
+        It gets the generated *instance* and must return the modified
+        instance. The *commit* parameter indicates the *commit* value that the
+        user passed into the :meth:`create` method. It defaults to ``True``
+        and should be respected, which means if it is set to ``False``, the
+        *instance* should not be saved.
+        '''
+        return instance
+
+    def pre_process_instance(self, instance):
+        '''
+        Same as :meth:`post_process_instance`, but it is being called before
+        saving an *instance*.
         '''
         return instance
 
@@ -438,6 +466,12 @@ class AutoFixtureBase(object):
         instance will not be saved and many to many relations will not be
         processed.
 
+        Subclasses that override ``create_one`` can specify arbitrary keyword
+        arguments. They will be passed through by the
+        :meth:`autofixture.base.AutoFixture.create` method and the helper
+        functions :func:`autofixture.create` and
+        :func:`autofixture.create_one`.
+
         May raise :exc:`CreateInstanceError` if constraints are not satisfied.
         '''
         tries = self.tries
@@ -446,7 +480,7 @@ class AutoFixtureBase(object):
         while process and tries > 0:
             for field in process:
                 self.process_field(instance, field)
-            process = self.check_constrains(instance)
+            process = self.check_constraints(instance)
             tries -= 1
         if tries == 0:
             raise CreateInstanceError(
@@ -459,18 +493,34 @@ class AutoFixtureBase(object):
                     self.tries,
                     ', '.join([field.name for field in process]),
             ))
+
+        instance = self.pre_process_instance(instance)
+
         if commit:
             instance.save()
-            for field in instance._meta.many_to_many:
+
+            #to handle particular case of GenericRelation
+            #in Django pre 1.6 it appears in .many_to_many
+            many_to_many = [f for f in instance._meta.many_to_many
+                            if not isinstance(f, GenericRelation)]
+            for field in many_to_many:
                 self.process_m2m(instance, field)
         signals.instance_created.send(
             sender=self,
             model=self.model,
             instance=instance,
             committed=commit)
-        return self.post_process_instance(instance)
 
-    def create(self, count=1, commit=True):
+        post_process_kwargs = {}
+        if 'commit' in inspect.getargspec(self.post_process_instance).args:
+            post_process_kwargs['commit'] = commit
+        else:
+            warnings.warn(
+                "Subclasses of AutoFixture need to provide a `commit` "
+                "argument for post_process_instance methods", DeprecationWarning)
+        return self.post_process_instance(instance, **post_process_kwargs)
+
+    def create(self, count=1, commit=True, **kwargs):
         '''
         Create and return ``count`` model instances. If *commit* is ``False``
         the instances will not be saved and many to many relations will not be
@@ -481,18 +531,18 @@ class AutoFixtureBase(object):
         The method internally calls :meth:`create_one` to generate instances.
         '''
         object_list = []
-        for i in xrange(count):
-            instance = self.create_one(commit=commit)
+        for i in range(count):
+            instance = self.create_one(commit=commit, **kwargs)
             object_list.append(instance)
         return object_list
 
     def iter(self, count=1, commit=True):
-        for i in xrange(count):
+        for i in range(count):
             yield self.create_one(commit=commit)
 
     def __iter__(self):
         yield self.create_one()
 
 
-class AutoFixture(AutoFixtureBase):
-    __metaclass__ = AutoFixtureMetaclass
+class AutoFixture(with_metaclass(AutoFixtureMetaclass, AutoFixtureBase)):
+    pass

@@ -2,6 +2,10 @@
 django-autofixture
 ==================
 
+.. image:: https://travis-ci.org/gregmuellegger/django-autofixture.png
+   :alt: Build Status
+   :target: https://travis-ci.org/gregmuellegger/django-autofixture
+
 This app aims to provide a simple way of loading masses of randomly generated
 test data into your development database. You can use a management command to
 load test data through command line.
@@ -88,8 +92,10 @@ instance to follow foreignkeys by generating new related models::
 
     fixture = AutoFixture(Entry, generate_fk=True)
 
-This generates new instance for *all* foreignkey fields of ``Entry``. Its
-possible to limit this behaviour to single fields::
+This generates new instance for *all* foreignkey fields of ``Entry``. Unless
+the model has a foreign key reference to itself, wherein the field will be set
+to None if allowed or raise a ``CreateInstanceError`` if not. This is to prevent
+max recursion depth errors. Its possible to limit this behaviour to single fields::
 
     fixture = AutoFixture(Entry, generate_fk=['author'])
 
@@ -111,6 +117,22 @@ specific value. This is easily achieved with the ``field_values`` attribute of
     fixture = AutoFixture(Entry,
         field_values={'pub_date': datetime(2010, 2, 1)})
 
+
+Limiting the set of models assigned to a ForeignKey field
+----------------------------------------------------------
+
+You could, for example, limit the Users assigned to a foreignkey field to only 
+non-staff Users.  Or create Entries for all Blogs not belonging to Yoko Ono.  
+Use the same construction as ForeignKey.limit_choices_to_ attribute::
+
+    from autofixture import AutoFixture, generators
+    fixture = AutoFixture(Entry,
+            field_values={
+                'blog': generators.InstanceSelector(Blog, 
+                    limit_choices_to={'name__ne':"Yoko Ono's blog"})
+                          } )
+
+    
 
 Custom autofixtures
 ===================
@@ -160,18 +182,27 @@ study the source on your own and see in which ways it can be used. There are
 already some parts documented with doc strings which might also be helpful for you.
 
 
-Future development
-==================
+Contribute
+==========
 
-The ``autofixture`` app is nearly feature complete from the point I wanted to
-have while starting development. But there is still much room for
-improvements. One feature you can expect in the future is for example support
-for multiple databases which was introduced by django 1.2. If you have any
-ideas or interests to contribute: Feel free to contact me or just start
-hacking.
+You can find the latest development version on github_. Get there and fork it,
+file bugs or send me nice wishes.
 
-Email me (gregor@muellegger.de), contact me on twitter
-(@gregmuellegger) or fork the git repository on github (``git clone
-git://github.com/gregmuellegger/django-autofixture.git``).
+To start developing, make sure the test suite passes::
+    
+    virtualenv .env
+    source .env/bin/activate
+    pip install -r requirements/tests.txt
+    python setup.py test
+
+Now go, do some coding.
+
+Feel free to drop me a message about critique or feature requests. You can get
+in touch with me by mail_ or twitter_.
 
 Happy autofixturing!
+
+.. _github: https://github.com/gregmuellegger/django-autofixture
+.. _mail: mailto:gregor@muellegger.de
+.. _twitter: http://twitter.com/gregmuellegger
+.. _ForeignKey.limit_choices_to: http://docs.djangoproject.com/en/dev/ref/models/fields/#django.db.models.ForeignKey.limit_choices_to

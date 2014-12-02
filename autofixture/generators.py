@@ -1,10 +1,24 @@
 # -*- coding: utf-8 -*-
-from decimal import Decimal
 import datetime
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+try:
+    from django.utils import lorem_ipsum
+except ImportError:
+    # Support Django < 1.8
+    from django.contrib.webdesign import lorem_ipsum
+import os
 import random
 import re
 import string
-import os
+import sys
+from decimal import Decimal
+
+
+if sys.version_info[0] < 3:
+    str_ = unicode
+else:
+    str_ = str
 
 
 # backporting os.path.relpath, only availabe in python >= 2.6
@@ -82,8 +96,8 @@ class NoneGenerator(Generator):
 
 
 class StringGenerator(Generator):
-    coerce_type = unicode
-    singleline_chars = string.letters + u' '
+    coerce_type = str_
+    singleline_chars = string.ascii_letters + u' '
     multiline_chars = singleline_chars + u'\n'
 
     def __init__(self, chars=None, multiline=False, min_length=1, max_length=1000, *args, **kwargs):
@@ -103,7 +117,7 @@ class StringGenerator(Generator):
     def generate(self):
         length = random.randint(self.min_length, self.max_length)
         value = u''
-        for x in xrange(length):
+        for x in range(length):
             value += random.choice(self.chars)
         return value
 
@@ -116,7 +130,7 @@ class SlugGenerator(StringGenerator):
 
 
 class LoremGenerator(Generator):
-    coerce_type = unicode
+    coerce_type = str_
     common = True
     count = 3
     method = 'b'
@@ -132,28 +146,31 @@ class LoremGenerator(Generator):
         super(LoremGenerator, self).__init__(*args, **kwargs)
 
     def generate(self):
-        from django.contrib.webdesign.lorem_ipsum import paragraphs, sentence, \
-            words
         if self.method == 'w':
-            lorem = words(self.count, common=self.common)
+            lorem = lorem_ipsum.words(self.count, common=self.common)
         elif self.method == 's':
-            lorem = u' '.join([sentence()
-                for i in xrange(self.count)])
+            lorem = u' '.join([
+                lorem_ipsum.sentence()
+                for i in range(self.count)])
         else:
-            paras = paragraphs(self.count, common=self.common)
+            paras = lorem_ipsum.paragraphs(self.count, common=self.common)
             if self.method == 'p':
                 paras = ['<p>%s</p>' % p for p in paras]
             lorem = u'\n\n'.join(paras)
         if self.max_length:
-            length = random.randint(self.max_length / 10, self.max_length)
+            length = random.randint(round(int(self.max_length) / 10),
+                                    self.max_length)
             lorem = lorem[:max(1, length)]
         return lorem.strip()
+
 
 class LoremSentenceGenerator(LoremGenerator):
     method = 's'
 
+
 class LoremHTMLGenerator(LoremGenerator):
     method = 'p'
+
 
 class LoremWordGenerator(LoremGenerator):
     count = 7
@@ -190,6 +207,25 @@ class PositiveSmallIntegerGenerator(SmallIntegerGenerator):
     min_value = 0
 
 
+class FloatGenerator(IntegerGenerator):
+    coerce_type = float
+    decimal_digits = 1
+
+    def __init__(self, decimal_digits=None, *args, **kwargs):
+        if decimal_digits is not None:
+            self.decimal_digits = decimal_digits
+        super(IntegerGenerator, self).__init__(*args, **kwargs)
+
+    def generate(self):
+        value = super(FloatGenerator, self).generate()
+        value = float(value)
+        if self.decimal_digits:
+            digits = random.randint(1, 10 ^ self.decimal_digits) - 1
+            digits = float(digits)
+            value = value + digits / (10 ^ self.decimal_digits)
+        return value
+
+
 class ChoicesGenerator(Generator):
     def __init__(self, choices=(), values=(), *args, **kwargs):
         assert len(choices) or len(values)
@@ -218,14 +254,16 @@ class NullBooleanGenerator(BooleanGenerator):
 
 
 class DateTimeGenerator(Generator):
-    min_date = datetime.datetime.now() - datetime.timedelta(365 * 5)
-    max_date = datetime.datetime.now() + datetime.timedelta(365 * 1)
-
     def __init__(self, min_date=None, max_date=None, *args, **kwargs):
+        from django.utils import timezone
         if min_date is not None:
             self.min_date = min_date
+        else:
+            self.min_date = timezone.now() - datetime.timedelta(365 * 5)
         if max_date is not None:
             self.max_date = max_date
+        else:
+            self.max_date = timezone.now() + datetime.timedelta(365 * 1)
         assert self.min_date < self.max_date
         super(DateTimeGenerator, self).__init__(*args, **kwargs)
 
@@ -276,29 +314,83 @@ class DecimalGenerator(Generator):
         return value
 
 
+class FirstNameGenerator(Generator):
+    """ Generates a first name, either male or female """
+
+    male = [
+        'Abraham', 'Adam', 'Anthony', 'Brian', 'Bill', 'Ben', 'Calvin',
+        'David', 'Daniel', 'George', 'Henry', 'Isaac', 'Ian', 'Jonathan',
+        'Jeremy', 'Jacob', 'John', 'Jerry', 'Joseph', 'James', 'Larry',
+        'Michael', 'Mark', 'Paul', 'Peter', 'Phillip', 'Stephen', 'Tony',
+        'Titus', 'Trevor', 'Timothy', 'Victor', 'Vincent', 'Winston', 'Walt']
+    female = [
+        'Abbie', 'Anna', 'Alice', 'Beth', 'Carrie', 'Christina', 'Danielle',
+        'Emma', 'Emily', 'Esther', 'Felicia', 'Grace', 'Gloria', 'Helen',
+        'Irene', 'Joanne', 'Joyce', 'Jessica', 'Kathy', 'Katie', 'Kelly',
+        'Linda', 'Lydia', 'Mandy', 'Mary', 'Olivia', 'Priscilla',
+        'Rebecca', 'Rachel', 'Susan', 'Sarah', 'Stacey', 'Vivian']
+
+    def __init__(self, gender=None):
+        self.gender = gender
+        self.all = self.male + self.female
+
+    def generate(self):
+        if self.gender == 'm':
+            return random.choice(self.male)
+        elif self.gender == 'f':
+            return random.choice(self.female)
+        else:
+            return random.choice(self.all)
+
+
+class LastNameGenerator(Generator):
+    """ Generates a last name """
+
+    surname = [
+        'Smith', 'Walker', 'Conroy', 'Stevens', 'Jones', 'Armstrong',
+        'Johnson', 'White', 'Stone', 'Strong', 'Olson', 'Lee', 'Forrest',
+        'Baker', 'Portman', 'Davis', 'Clark', 'Brown', 'Roberts', 'Ellis',
+        'Jackson', 'Marshall', 'Wang', 'Chen', 'Chou', 'Tang', 'Huang', 'Liu',
+        'Shih', 'Su', 'Song', 'Yang', 'Chan', 'Tsai', 'Wong', 'Hsu', 'Cheng',
+        'Chang', 'Wu', 'Lin', 'Yu', 'Yao', 'Kang', 'Park', 'Kim', 'Choi',
+        'Ahn', 'Mujuni']
+
+    def generate(self):
+        return random.choice(self.surname)
+
+
 class EmailGenerator(StringGenerator):
     chars = string.ascii_lowercase
 
-    def __init__(self, chars=None, max_length=30, tlds=None, *args, **kwargs):
+    def __init__(self, chars=None, max_length=30, tlds=None, static_domain=None, *args, **kwargs):
         assert max_length >= 6
         if chars is not None:
             self.chars = chars
         self.tlds = tlds
+        self.static_domain = static_domain
         super(EmailGenerator, self).__init__(self.chars, max_length=max_length, *args, **kwargs)
 
     def generate(self):
         maxl = self.max_length - 2
-        if self.tlds:
-            tld = random.choice(self.tlds)
-        elif maxl > 4:
-            tld = StringGenerator(self.chars, min_length=3, max_length=3).generate()
-        maxl -= len(tld)
-        assert maxl >= 2
+
+        if self.static_domain is None:
+            if self.tlds:
+                tld = random.choice(self.tlds)
+            elif maxl > 4:
+                tld = StringGenerator(self.chars, min_length=3, max_length=3).generate()
+            maxl -= len(tld)
+            assert maxl >= 2
+        else:
+            maxl -= len(self.static_domain)
 
         name = StringGenerator(self.chars, min_length=1, max_length=maxl-1).generate()
         maxl -= len(name)
-        domain = StringGenerator(self.chars, min_length=1, max_length=maxl).generate()
-        return '%s@%s.%s' % (name, domain, tld)
+
+        if self.static_domain is None:
+            domain = StringGenerator(self.chars, min_length=1, max_length=maxl).generate()
+            return '%s@%s.%s' % (name, domain, tld)
+        else:
+            return '%s@%s' % (name, self.static_domain)
 
 
 class URLGenerator(StringGenerator):
@@ -336,10 +428,10 @@ class URLGenerator(StringGenerator):
 
 
 class IPAddressGenerator(Generator):
-    coerce_type = unicode
+    coerce_type = str_
 
     def generate(self):
-        return '.'.join([unicode(part) for part in [
+        return '.'.join([str_(part) for part in [
             IntegerGenerator(min_value=1, max_value=254).generate(),
             IntegerGenerator(min_value=0, max_value=254).generate(),
             IntegerGenerator(min_value=0, max_value=254).generate(),
@@ -348,7 +440,7 @@ class IPAddressGenerator(Generator):
 
 
 class TimeGenerator(Generator):
-    coerce_type = unicode
+    coerce_type = str_
 
     def generate(self):
         return u'%02d:%02d:%02d' % (
@@ -359,7 +451,7 @@ class TimeGenerator(Generator):
 
 
 class FilePathGenerator(Generator):
-    coerce_type = unicode
+    coerce_type = str_
 
     def __init__(self, path, match=None, recursive=False, max_length=None, *args, **kwargs):
         self.path = path
@@ -443,7 +535,7 @@ class MultipleInstanceGenerator(InstanceGenerator):
 
     def generate(self):
         instances = []
-        for i in xrange(random.randint(self.min_count, self.max_count)):
+        for i in range(random.randint(self.min_count, self.max_count)):
             instances.append(
                 super(MultipleInstanceGenerator, self).generate())
         return instances
@@ -477,3 +569,72 @@ class InstanceSelector(Generator):
             min_count = self.min_count or 0
             count = random.randint(min_count, self.max_count)
             return self.queryset.order_by('?')[:count]
+
+class WeightedGenerator(Generator):
+    """
+    Takes a list of generator objects and integer weights, of the following form:
+    [(generator, weight), (generator, weight),...]
+    and returns a value from a generator chosen randomly by weight.
+    """
+
+    def __init__(self, choices):
+        self.choices = choices
+
+    def weighted_choice(self, choices):
+        total = sum(w for c, w in choices)
+        r = random.uniform(0, total)
+        upto = 0
+        for c, w in choices:
+          if upto + w > r:
+             return c
+          upto += w
+
+    def generate(self):
+        return self.weighted_choice(self.choices).generate()
+
+class ImageGenerator(Generator):
+    '''
+    Generates a valid palceholder image and saves it to the ``settings.MEDIA_ROOT``
+    The returned filename is relative to ``MEDIA_ROOT``.
+    '''
+
+    default_sizes = (
+        (100,100),
+        (200,300),
+        (400,600),
+    )
+
+    def __init__(self, width=None, height=None, sizes=None,
+                 path='_autofixture', storage=None, *args, **kwargs):
+        self.width = width
+        self.height = height
+        self.sizes = list(sizes or self.default_sizes)
+        if self.width and self.height:
+            self.sizes.append((width, height))
+        self.path = path
+        self.storage = storage or default_storage
+        super(ImageGenerator, self).__init__(*args, **kwargs)
+
+    def generate_file_path(self, width, height, suffix=None):
+        suffix = suffix if suffix is not None else ''
+        filename ='{width}x{height}{suffix}.png'.format(
+            width=width, height=height, suffix=suffix)
+        return os.path.join(self.path, filename)
+
+    def generate(self):
+        from .placeholder import get_placeholder_image
+
+        width, height = random.choice(self.sizes)
+
+        # Ensure that _autofixture folder exists.
+        i = 0
+        path = self.generate_file_path(width, height)
+
+        while self.storage.exists(path):
+            i += 1
+            path = self.generate_file_path(width, height, '_{0}'.format(i))
+
+        return self.storage.save(
+            path,
+            ContentFile(get_placeholder_image(width, height))
+        )
